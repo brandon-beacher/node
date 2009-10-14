@@ -1,5 +1,3 @@
-#!/usr/bin/make -f
-
 all:
 	@tools/waf-light build
 
@@ -46,12 +44,12 @@ website-upload: doc
 	scp doc/* linode:~/tinyclouds/node/
 
 clean:
-	@-rm doc/node.1 doc/api.xml doc/api.html
+	@-rm -f doc/node.1 doc/api.xml doc/api.html
 	@tools/waf-light clean
 
-distclean:
-	@tools/waf-light distclean
-	@-rm -f *.pyc
+distclean: clean
+	@-rm -rf build/
+	@-find tools/ -name "*.pyc" -delete
 
 check:
 	@tools/waf-light check

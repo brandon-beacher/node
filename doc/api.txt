@@ -1,7 +1,7 @@
 NODE(1)
 =======
 Ryan Dahl <ry@tinyclouds.org>
-Version, 0.1.13, 2009.09.30
+Version, 0.1.14, 2009.10.09
 
 
 == NAME
@@ -16,14 +16,14 @@ An example of a web server written with Node which responds with "Hello
 World": 
 
 ----------------------------------------
-node.mixin(require("/utils.js"));
-node.mixin(require("/http.js"));
-createServer(function (request, response) {
+var sys = require("/sys.js"), 
+   http = require("/http.js");
+http.createServer(function (request, response) {
   response.sendHeader(200, {"Content-Type": "text/plain"});
   response.sendBody("Hello World\n");
   response.finish();
 }).listen(8000);
-puts("Server running at http://127.0.0.1:8000/");
+sys.puts("Server running at http://127.0.0.1:8000/");
 ----------------------------------------
 
 To run the server, put the code into a file called +example.js+ and execute
@@ -59,6 +59,11 @@ error reporting.
 
 +__filename+ ::
 The filename of the script being executed.
+
++__module+ ::
+A reference to the current module (of type +node.Module+). In particular
++__module.exports+ is the same as the +exports+ object. See +src/node.js+ for
+more information.
 
 +require(path)+ ::
 See the modules section.
@@ -109,9 +114,9 @@ An array containing the command line arguments.
 An object containing the user environment. See environ(7).
 
 
-=== Utilities
+=== System module
 
-These function are in +"/utils.js"+. Use +require("/utils.js")+ to access them.
+These function are in +"/sys.js"+. Use +require("/sys.js")+ to access them.
 
 +puts(string)+::
 Outputs the +string+ and a trailing new-line to +stdout+.
@@ -131,8 +136,8 @@ Executes the command as a child process, buffers the output and returns it
 in a promise callback.
 +
 ----------------------------------------
-node.mixin(require("/utils.js"));
-exec("ls /").addCallback(function (stdout, stderr) {
+var sys = require("/sys.js");
+sys.exec("ls /").addCallback(function (stdout, stderr) {
   puts(stdout);
 });
 ----------------------------------------
@@ -200,6 +205,7 @@ emit anymore events.
 | Event       | Parameters       | Notes
 | +"success"+ | (depends)        |
 | +"error"+   | (depends)        |
+| +"cancel"+  | (depends)        |
 |=========================================================
 
 +promise.addCallback(listener)+ ::
@@ -207,6 +213,9 @@ Adds a listener for the +"success"+ event. Returns the same promise object.
 
 +promise.addErrback(listener)+ ::
 Adds a listener for the +"error"+ event. Returns the same promise object.
+
++promise.addCancelback(listener)+ ::
+Adds a listener for the +"cancel"+ event. Returns the same promise object.
 
 +promise.emitSuccess(arg1, arg2, ...)+ ::
 If you created the promise (by doing +new node.Promise()+) then call
@@ -217,6 +226,37 @@ the moment due to a bug; use +emitSuccess+ instead.)
 
 +promise.emitError(arg1, arg2, ...)+ ::
 Emits the +"error"+ event.
+
++promise.emitCancel(arg1, arg2, ...)+ ::
+Emits the +"cancel"+ event. You may still get a +"success"+ or +"error"+
+callback if the promise giver does not handle the cancel event. Use
++promise.cancel()+ to ignore any later events.
+
++promise.cancel()+ ::
+Clears all +"success"+ and +"error"+ event listeners from the promise, then
+emits the +"cancel"+ event. Whether or not the promise is actually canceled
+or not depends on the promise giver.
+
++promise.timeout(timeout = undefined)+ ::
+If the +timeout+ parameter is provided, the promise will emit an +"error"+
+event after the given amount of millseconds. The timeout is canceled by any
++"success"+, +"error"+ or +"cancel"+ event being emitted by the Promise.
++
+To tell apart a timeout from a regular "error" event, use the following test:
++
+----------------------------------------
+promise.addErrback(function(e) {
+  if (e instanceof Error && e.message === 'timeout') {
+    // handle timeout
+  } else {
+    // handle regular error
+  }
+});
+----------------------------------------
++
+If the +timeout+ parameter is not provided, the current timeout value, if any,
+is returned.
++
 
 +promise.wait()+ ::
 Blocks futher execution until the promise emits a success or error event.
@@ -280,9 +320,9 @@ one-to-one correspondence.  As an example, +foo.js+ loads the module
 The contents of +foo.js+:
 
 ----------------------------------------
-var circle = require("circle.js");
-node.mixin(require("/utils.js"));
-puts("The area of a circle of radius 4 is " + circle.area(4));
+var circle = require("circle.js"),
+       sys = require("/sys.js");
+sys.puts("The area of a circle of radius 4 is " + circle.area(4));
 ----------------------------------------
 
 The contents of +circle.js+:
@@ -304,7 +344,7 @@ The module +circle.js+ has exported the functions +area()+ and
 object.  (Alternatively, one can use +this+ instead of +exports+.) Variables
 local to the module will be private. In this example the variable +PI+ is
 private to +circle.js+. The function +puts()+ comes from the module
-+"/utils.js"+.
++"/sys.js"+.
 
 The module path is relative to the file calling +require()+.  That is,
 +circle.js+ must be in the same directory as +foo.js+ for +require()+ to
@@ -313,7 +353,7 @@ find it.
 Use +node.mixin()+ to include modules into the global namespace.
 
 ----------------------------------------
-node.mixin(process, require("circle.js"), require("/utils.js"));
+node.mixin(process, require("circle.js"), require("/sys.js"));
 puts("The area of a cirlce of radius 4 is " + area(4));
 ----------------------------------------
 
@@ -393,15 +433,19 @@ Node provides a tridirectional +popen(3)+ facility through the class
                             +"error"+ callbacks will no longer be made.
 |=========================================================
 
-+node.createChildProcess(command)+::
-Launches a new process with the given +command+. For example:
++node.createChildProcess(command, args=[], env=ENV)+::
+Launches a new process with the given +command+, command line arguments, and
+environmental variables. For example:
 +
 ----------------------------------------
-var ls = node.createChildProcess("ls -lh /usr");
+var ls = node.createChildProcess("ls", ["-lh", "/usr"]);
 ls.addListener("output", function (data) {
   puts(data);
 });
 ----------------------------------------
++
+Note, if you just want to buffer the output of a command and return it, then
++exec()+ in +/sys.js+ might be better.
 
 
 +child.pid+ ::
@@ -1005,8 +1049,8 @@ Here is an example of a echo server which listens for connections
 on port 7000
 
 ----------------------------------------
-node.mixin(require("/tcp.js"));
-var server = createServer(function (socket) {
+var tcp = require("/tcp.js");
+var server = tcp.createServer(function (socket) {
   socket.setEncoding("utf8");
   socket.addListener("connect", function () {
     socket.send("hello\r\n");
@@ -1243,15 +1287,16 @@ result of the last expression.
 
 The library is called +/repl.js+ and it can be used like this:
 ------------------------------------
-node.mixin(require("/utils.js"));
-node.mixin(require("/tcp.js"));
+var sys = require("/sys.js"),
+    tcp = require("/tcp.js"),
+   repl = require("/repl.js");
 nconnections = 0;
-createServer(function (c) {
-  error("Connection!");
+tcp.createServer(function (c) {
+  sys.error("Connection!");
   nconnections += 1;
   c.close();
 }).listen(5000);
-require("/repl.js").start("simple tcp server> ");
+repl.start("simple tcp server> ");
 ------------------------------------
 
 

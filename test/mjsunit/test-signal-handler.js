@@ -1,26 +1,35 @@
 node.mixin(require("common.js"));
 
 if (process.ARGV[2] === "-child") {
-  
+  node.stdio.open();
   var handler = new node.SignalHandler(node.SIGUSR1);
   handler.addListener("signal", function() {
-    print("handled SIGUSR1");
-    handler.stop();
+    node.stdio.write("handled SIGUSR1");
+    setTimeout(function () {
+      // Allow some time for the write to go through the pipez
+      process.exit(0);
+    }, 50);
   });
+  debug("CHILD!!!");
   
 } else {
-  
-  var command = process.ARGV[0] + ' -- ' + process.ARGV[1] + ' -child';
-  
-  var child = node.createChildProcess(command);
+
+  var child = node.createChildProcess(ARGV[0], ['--', ARGV[1], '-child']);
 
   var output = "";
   
   child.addListener('output', function (chunk) {
+    puts("Child (stdout) said: " + JSON.stringify(chunk));
     if (chunk) { output += chunk };
   });
-  
-  setTimeout(function() { child.kill(node.SIGUSR1) }, 1000);
+
+  child.addListener('error', function (chunk) {
+    if (/CHILD!!!/.exec(chunk)) {
+      puts("Sending SIGUSR1 to " + child.pid);
+      child.kill(node.SIGUSR1)
+    }
+    puts("Child (stderr) said: " + JSON.stringify(chunk));
+  });
 
   process.addListener("exit", function () {
     assertEquals("handled SIGUSR1", output);

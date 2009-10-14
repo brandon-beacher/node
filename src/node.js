@@ -6,14 +6,25 @@ node.createProcess = function () {
   throw "node.createProcess() has been changed to node.createChildProcess() update your code";
 };
 
-node.createChildProcess = function (command) {
+node.createChildProcess = function (file, args, env) {
   var child = new node.ChildProcess();
-  child.spawn(command);
+  args = args || [];
+  env = env || process.ENV;
+  var envPairs = [];
+  for (var key in env) {
+    if (env.hasOwnProperty(key)) {
+      envPairs.push(key + "=" + env[key]);
+    }
+  }
+  // TODO Note envPairs is not currently used in child_process.cc. The PATH
+  // needs to be searched for the 'file' command if 'file' does not contain
+  // a '/' character.
+  child.spawn(file, args, envPairs);
   return child;
 };
 
 node.exec = function () {
-  throw new Error("node.exec() has moved. Use require('/utils.js') to bring it back.");
+  throw new Error("node.exec() has moved. Use require('/sys.js') to bring it back.");
 }
 
 node.http.createServer = function () {
@@ -27,6 +38,10 @@ node.http.createClient = function () {
 node.tcp.createConnection = function (port, host) {
   throw new Error("node.tcp.createConnection() has moved. Use require('/tcp.js') to access it.");
 };
+
+include = function () {
+  throw new Error("include() has been removed. Use node.mixin(process, require(file)) to get the same effect.");
+}
 
 /* From jQuery.extend in the jQuery JavaScript Library v1.3.2
  * Copyright (c) 2009 John Resig
@@ -120,7 +135,7 @@ if (ENV["NODE_LIBRARY_PATHS"]) {
 node.Module = function (filename, parent) {
   node.assert(filename.charAt(0) == "/");
   this.filename = filename;
-  this.target = {};
+  this.exports = {};
   this.parent = parent;
 
   this.loaded = false;
@@ -137,7 +152,7 @@ node.Module.cache = {};
     if (fullPath in node.Module.cache) {
       module = node.Module.cache[fullPath];
       setTimeout(function () {
-        loadPromise.emitSuccess(module.target);
+        loadPromise.emitSuccess(module.exports);
       }, 0);
     } else {
       module = new node.Module(fullPath, parent);
@@ -167,13 +182,13 @@ node.Module.cache = {};
     }
   }
 
-  node.loadModule = function (requestedPath, target, parent) {
+  node.loadModule = function (requestedPath, exports, parent) {
     var loadPromise = new node.Promise();
 
-    // On success copy the loaded properties into the target
+    // On success copy the loaded properties into the exports
     loadPromise.addCallback(function (t) {
       for (var prop in t) {
-        if (t.hasOwnProperty(prop)) target[prop] = t[prop];
+        if (t.hasOwnProperty(prop)) exports[prop] = t[prop];
       }
     });
 
@@ -232,8 +247,8 @@ node.Module.prototype.loadObject = function (loadPromise) {
   node.fs.exists(self.filename, function (does_exist) {
     if (does_exist) {
       self.loaded = true;
-      node.dlopen(self.filename, self.target); // FIXME synchronus
-      loadPromise.emitSuccess(self.target);
+      node.dlopen(self.filename, self.exports); // FIXME synchronus
+      loadPromise.emitSuccess(self.exports);
     } else {
       loadPromise.emitError(new Error("Error reading " + self.filename));
     }
@@ -252,33 +267,33 @@ node.Module.prototype.loadScript = function (loadPromise) {
     // remove shebang
     content = content.replace(/^\#\!.*/, '');
 
-    node.loadingModules = [];
-
     function requireAsync (url) {
-      return self.newChild(url, {});
+      return self.newChild(url);
     }
 
     function require (url) {
       return requireAsync(url).wait();
     }
 
+    require.async = requireAsync;
+
     // create wrapper function
-    var wrapper = "function (__filename, exports, require) { " + content + "\n};";
+    var wrapper = "var __wrap__ = function (__module, __filename, exports, require) { " 
+                + content 
+                + "\n}; __wrap__;";
     var compiled_wrapper = node.compile(wrapper, self.filename);
 
-    node.loadingModules.unshift(self);
-    compiled_wrapper.apply(self.target, [self.filename, self.target, require]);
-    node.loadingModules.shift();
+    compiled_wrapper.apply(self.exports, [self, self.filename, self.exports, require]);
 
     self.waitChildrenLoad(function () {
       self.loaded = true;
-      loadPromise.emitSuccess(self.target);
+      loadPromise.emitSuccess(self.exports);
     });
   });
 };
 
-node.Module.prototype.newChild = function (path, target) {
-  return node.loadModule(path, target, this);
+node.Module.prototype.newChild = function (path) {
+  return node.loadModule(path, {}, this);
 };
 
 node.Module.prototype.waitChildrenLoad = function (callback) {
@@ -305,7 +320,7 @@ process.exit = function (code) {
 };
 
 node.exit = function (code) {
-  throw new Error("process.exit() has been renamed to process.exit().");
+  throw new Error("node.exit() has been renamed to process.exit().");
 };
 
 (function () {

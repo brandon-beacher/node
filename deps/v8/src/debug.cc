@@ -1677,22 +1677,6 @@ void Debug::ClearMirrorCache() {
 }
 
 
-// If an object given is an external string, check that the underlying
-// resource is accessible. For other kinds of objects, always return true.
-static bool IsExternalStringValid(Object* str) {
-  if (!str->IsString() || !StringShape(String::cast(str)).IsExternal()) {
-    return true;
-  }
-  if (String::cast(str)->IsAsciiRepresentation()) {
-    return ExternalAsciiString::cast(str)->resource() != NULL;
-  } else if (String::cast(str)->IsTwoByteRepresentation()) {
-    return ExternalTwoByteString::cast(str)->resource() != NULL;
-  } else {
-    return true;
-  }
-}
-
-
 void Debug::CreateScriptCache() {
   HandleScope scope;
 
@@ -1711,7 +1695,7 @@ void Debug::CreateScriptCache() {
   while (iterator.has_next()) {
     HeapObject* obj = iterator.next();
     ASSERT(obj != NULL);
-    if (obj->IsScript() && IsExternalStringValid(Script::cast(obj)->source())) {
+    if (obj->IsScript() && Script::cast(obj)->HasValidSource()) {
       script_cache_->Add(Handle<Script>(Script::cast(obj)));
       count++;
     }
@@ -1774,6 +1758,8 @@ bool Debugger::never_unload_debugger_ = false;
 v8::Debug::MessageHandler2 Debugger::message_handler_ = NULL;
 bool Debugger::debugger_unload_pending_ = false;
 v8::Debug::HostDispatchHandler Debugger::host_dispatch_handler_ = NULL;
+v8::Debug::DebugMessageDispatchHandler
+    Debugger::debug_message_dispatch_handler_ = NULL;
 int Debugger::host_dispatch_micros_ = 100 * 1000;
 DebuggerAgent* Debugger::agent_ = NULL;
 LockingCommandMessageQueue Debugger::command_queue_(kQueueInitialSize);
@@ -2405,6 +2391,12 @@ void Debugger::SetHostDispatchHandler(v8::Debug::HostDispatchHandler handler,
 }
 
 
+void Debugger::SetDebugMessageDispatchHandler(
+    v8::Debug::DebugMessageDispatchHandler handler) {
+  debug_message_dispatch_handler_ = handler;
+}
+
+
 // Calls the registered debug message handler. This callback is part of the
 // public API.
 void Debugger::InvokeMessageHandler(MessageImpl message) {
@@ -2434,6 +2426,10 @@ void Debugger::ProcessCommand(Vector<const uint16_t> command,
   // Set the debug command break flag to have the command processed.
   if (!Debug::InDebugger()) {
     StackGuard::DebugCommand();
+  }
+
+  if (Debugger::debug_message_dispatch_handler_ != NULL) {
+    Debugger::debug_message_dispatch_handler_();
   }
 }
 
@@ -2497,6 +2493,11 @@ void Debugger::StopAgent() {
   }
 }
 
+
+void Debugger::WaitForAgent() {
+  if (agent_ != NULL)
+    agent_->WaitUntilListening();
+}
 
 MessageImpl MessageImpl::NewEvent(DebugEvent event,
                                   bool running,
