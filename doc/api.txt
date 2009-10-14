@@ -53,6 +53,10 @@ These objects are available to all programs.
 +node.cwd()+::
 Returns the current working directory of the process.
 
++node.kill(pid, signal)+ ::
+See kill(2).  The standard POSIX signals are defined under the +node+
+namespace (+node.SIGINT+, +node.SIGUSR1+, ...).
+
 +node.compile(source, scriptOrigin)+::
 Just like +eval()+ except that you can specify a +scriptOrigin+ for better
 error reporting.
@@ -113,6 +117,8 @@ An array containing the command line arguments.
 +process.ENV+ ::
 An object containing the user environment. See environ(7).
 
++process.pid+ ::
+The PID of the process.
 
 === System module
 
@@ -402,6 +408,19 @@ a +intervalId+ for possible use with +clearInterval()+.
 
 +clearInterval(intervalId)+::
 Stops a interval from triggering.
+
+
+=== Signal Handlers
+
++process.addListener(signalName, listener)+ ::
+Adds a listener for a signal sent to this process.  See sigaction(2)
+for a list of standard POSIX signal names such as SIGINT, SIGUSR1, etc.
++
+----------------------------------------
+server.addListener("SIGINT", function () {
+  // orderly closing of resources might occur here
+});
+----------------------------------------
 
 
 === Child Processes
