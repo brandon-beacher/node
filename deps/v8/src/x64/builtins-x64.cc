@@ -53,7 +53,7 @@ static void EnterArgumentsAdaptorFrame(MacroAssembler* masm) {
   __ movq(rbp, rsp);
 
   // Store the arguments adaptor context sentinel.
-  __ push(Immediate(Smi::FromInt(StackFrame::ARGUMENTS_ADAPTOR)));
+  __ Push(Smi::FromInt(StackFrame::ARGUMENTS_ADAPTOR));
 
   // Push the function on the stack.
   __ push(rdi);
@@ -75,14 +75,9 @@ static void LeaveArgumentsAdaptorFrame(MacroAssembler* masm) {
   __ pop(rbp);
 
   // Remove caller arguments from the stack.
-  // rbx holds a Smi, so we convery to dword offset by multiplying by 4.
-  // TODO(smi): Find a way to abstract indexing by a smi.
-  ASSERT_EQ(kSmiTagSize, 1 && kSmiTag == 0);
-  ASSERT_EQ(kPointerSize, (1 << kSmiTagSize) * 4);
-  // TODO(smi): Find way to abstract indexing by a smi.
   __ pop(rcx);
-  // 1 * kPointerSize is offset of receiver.
-  __ lea(rsp, Operand(rsp, rbx, times_half_pointer_size, 1 * kPointerSize));
+  SmiIndex index = masm->SmiToIndex(rbx, rbx, kPointerSizeLog2);
+  __ lea(rsp, Operand(rsp, index.reg, index.scale, 1 * kPointerSize));
   __ push(rcx);
 }
 
@@ -251,6 +246,8 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     const int kGlobalIndex =
         Context::kHeaderSize + Context::GLOBAL_INDEX * kPointerSize;
     __ movq(rbx, FieldOperand(rsi, kGlobalIndex));
+    __ movq(rbx, FieldOperand(rbx, GlobalObject::kGlobalContextOffset));
+    __ movq(rbx, FieldOperand(rbx, kGlobalIndex));
     __ movq(rbx, FieldOperand(rbx, GlobalObject::kGlobalReceiverOffset));
 
     __ bind(&patch_receiver);
@@ -323,47 +320,47 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
   __ push(Operand(rbp, kArgumentsOffset));
   __ InvokeBuiltin(Builtins::APPLY_PREPARE, CALL_FUNCTION);
 
-  if (FLAG_check_stack) {
-    // We need to catch preemptions right here, otherwise an unlucky preemption
-    // could show up as a failed apply.
-    Label retry_preemption;
-    Label no_preemption;
-    __ bind(&retry_preemption);
-    ExternalReference stack_guard_limit =
-        ExternalReference::address_of_stack_guard_limit();
-    __ movq(kScratchRegister, stack_guard_limit);
-    __ movq(rcx, rsp);
-    __ subq(rcx, Operand(kScratchRegister, 0));
-    // rcx contains the difference between the stack limit and the stack top.
-    // We use it below to check that there is enough room for the arguments.
-    __ j(above, &no_preemption);
+  // Check the stack for overflow or a break request.
+  // We need to catch preemptions right here, otherwise an unlucky preemption
+  // could show up as a failed apply.
+  Label retry_preemption;
+  Label no_preemption;
+  __ bind(&retry_preemption);
+  ExternalReference stack_guard_limit =
+      ExternalReference::address_of_stack_guard_limit();
+  __ movq(kScratchRegister, stack_guard_limit);
+  __ movq(rcx, rsp);
+  __ subq(rcx, Operand(kScratchRegister, 0));
+  // rcx contains the difference between the stack limit and the stack top.
+  // We use it below to check that there is enough room for the arguments.
+  __ j(above, &no_preemption);
 
-    // Preemption!
-    // Because runtime functions always remove the receiver from the stack, we
-    // have to fake one to avoid underflowing the stack.
-    __ push(rax);
-    __ push(Immediate(Smi::FromInt(0)));
+  // Preemption!
+  // Because runtime functions always remove the receiver from the stack, we
+  // have to fake one to avoid underflowing the stack.
+  __ push(rax);
+  __ Push(Smi::FromInt(0));
 
-    // Do call to runtime routine.
-    __ CallRuntime(Runtime::kStackGuard, 1);
-    __ pop(rax);
-    __ jmp(&retry_preemption);
+  // Do call to runtime routine.
+  __ CallRuntime(Runtime::kStackGuard, 1);
+  __ pop(rax);
+  __ jmp(&retry_preemption);
 
-    __ bind(&no_preemption);
+  __ bind(&no_preemption);
 
-    Label okay;
-    // Make rdx the space we need for the array when it is unrolled onto the
-    // stack.
-    __ PositiveSmiTimesPowerOfTwoToInteger64(rdx, rax, kPointerSizeLog2);
-    __ cmpq(rcx, rdx);
-    __ j(greater, &okay);
+  Label okay;
+  // Make rdx the space we need for the array when it is unrolled onto the
+  // stack.
+  __ PositiveSmiTimesPowerOfTwoToInteger64(rdx, rax, kPointerSizeLog2);
+  __ cmpq(rcx, rdx);
+  __ j(greater, &okay);
 
-    // Too bad: Out of stack space.
-    __ push(Operand(rbp, kFunctionOffset));
-    __ push(rax);
-    __ InvokeBuiltin(Builtins::APPLY_OVERFLOW, CALL_FUNCTION);
-    __ bind(&okay);
-  }
+  // Too bad: Out of stack space.
+  __ push(Operand(rbp, kFunctionOffset));
+  __ push(rax);
+  __ InvokeBuiltin(Builtins::APPLY_OVERFLOW, CALL_FUNCTION);
+  __ bind(&okay);
+  // End of stack check.
 
   // Push current index and limit.
   const int kLimitOffset =
@@ -405,6 +402,8 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
   const int kGlobalOffset =
       Context::kHeaderSize + Context::GLOBAL_INDEX * kPointerSize;
   __ movq(rbx, FieldOperand(rsi, kGlobalOffset));
+  __ movq(rbx, FieldOperand(rbx, GlobalObject::kGlobalContextOffset));
+  __ movq(rbx, FieldOperand(rbx, kGlobalOffset));
   __ movq(rbx, FieldOperand(rbx, GlobalObject::kGlobalReceiverOffset));
 
   // Push the receiver.
@@ -434,7 +433,7 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
 
   // Update the index on the stack and in register rax.
   __ movq(rax, Operand(rbp, kIndexOffset));
-  __ addq(rax, Immediate(Smi::FromInt(1)));
+  __ SmiAddConstant(rax, rax, Smi::FromInt(1));
   __ movq(Operand(rbp, kIndexOffset), rax);
 
   __ bind(&entry);
@@ -507,7 +506,7 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
   __ Move(FieldOperand(result, JSArray::kPropertiesOffset),
           Factory::empty_fixed_array());
   // Field JSArray::kElementsOffset is initialized later.
-  __ movq(FieldOperand(result, JSArray::kLengthOffset), Immediate(0));
+  __ Move(FieldOperand(result, JSArray::kLengthOffset), Smi::FromInt(0));
 
   // If no storage is requested for the elements array just set the empty
   // fixed array.
@@ -718,14 +717,12 @@ static void ArrayNativeCode(MacroAssembler* masm,
   __ cmpq(rax, Immediate(1));
   __ j(not_equal, &argc_two_or_more);
   __ movq(rdx, Operand(rsp, kPointerSize));  // Get the argument from the stack.
-  Condition not_positive_smi = __ CheckNotPositiveSmi(rdx);
-  __ j(not_positive_smi, call_generic_code);
+  __ JumpIfNotPositiveSmi(rdx, call_generic_code);
 
   // Handle construction of an empty array of a certain size. Bail out if size
   // is to large to actually allocate an elements array.
-  __ JumpIfSmiGreaterEqualsConstant(rdx,
-                                    JSObject::kInitialMaxFastElementArray,
-                                    call_generic_code);
+  __ SmiCompare(rdx, Smi::FromInt(JSObject::kInitialMaxFastElementArray));
+  __ j(greater_equal, call_generic_code);
 
   // rax: argc
   // rdx: array_size (smi)
@@ -825,10 +822,10 @@ void Builtins::Generate_ArrayCode(MacroAssembler* masm) {
     __ movq(rbx, FieldOperand(rdi, JSFunction::kPrototypeOrInitialMapOffset));
     // Will both indicate a NULL and a Smi.
     ASSERT(kSmiTag == 0);
-    Condition not_smi = __ CheckNotSmi(rbx);
-    __ Assert(not_smi, "Unexpected initial map for Array function");
+    Condition not_smi = NegateCondition(masm->CheckSmi(rbx));
+    __ Check(not_smi, "Unexpected initial map for Array function");
     __ CmpObjectType(rbx, MAP_TYPE, rcx);
-    __ Assert(equal, "Unexpected initial map for Array function");
+    __ Check(equal, "Unexpected initial map for Array function");
   }
 
   // Run the native code for the Array function called as a normal function.
@@ -857,15 +854,15 @@ void Builtins::Generate_ArrayConstructCode(MacroAssembler* masm) {
     // does always have a map.
     GenerateLoadArrayFunction(masm, rbx);
     __ cmpq(rdi, rbx);
-    __ Assert(equal, "Unexpected Array function");
+    __ Check(equal, "Unexpected Array function");
     // Initial map for the builtin Array function should be a map.
     __ movq(rbx, FieldOperand(rdi, JSFunction::kPrototypeOrInitialMapOffset));
     // Will both indicate a NULL and a Smi.
     ASSERT(kSmiTag == 0);
-    Condition not_smi = __ CheckNotSmi(rbx);
-    __ Assert(not_smi, "Unexpected initial map for Array function");
+    Condition not_smi = NegateCondition(masm->CheckSmi(rbx));
+    __ Check(not_smi, "Unexpected initial map for Array function");
     __ CmpObjectType(rbx, MAP_TYPE, rcx);
-    __ Assert(equal, "Unexpected initial map for Array function");
+    __ Check(equal, "Unexpected initial map for Array function");
   }
 
   // Run the native code for the Array function called as constructor.
@@ -902,7 +899,6 @@ void Builtins::Generate_JSConstructCall(MacroAssembler* masm) {
   // edi: called object
   // eax: number of arguments
   __ bind(&non_function_call);
-
   // Set expected number of arguments to zero (not changing eax).
   __ movq(rbx, Immediate(0));
   __ GetBuiltinEntry(rdx, Builtins::CALL_NON_FUNCTION_AS_CONSTRUCTOR);
@@ -1143,11 +1139,9 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   __ LeaveConstructFrame();
 
   // Remove caller arguments from the stack and return.
-  ASSERT(kSmiTagSize == 1 && kSmiTag == 0);
-  // TODO(smi): Find a way to abstract indexing by a smi.
   __ pop(rcx);
-  // 1 * kPointerSize is offset of receiver.
-  __ lea(rsp, Operand(rsp, rbx, times_half_pointer_size, 1 * kPointerSize));
+  SmiIndex index = masm->SmiToIndex(rbx, rbx, kPointerSizeLog2);
+  __ lea(rsp, Operand(rsp, index.reg, index.scale, 1 * kPointerSize));
   __ push(rcx);
   __ IncrementCounter(&Counters::constructed_objects, 1);
   __ ret(0);

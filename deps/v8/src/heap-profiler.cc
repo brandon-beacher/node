@@ -28,6 +28,8 @@
 #include "v8.h"
 
 #include "heap-profiler.h"
+#include "frames-inl.h"
+#include "global-handles.h"
 #include "string-stream.h"
 
 namespace v8 {
@@ -76,6 +78,10 @@ JSObjectsCluster Clusterizer::Clusterize(HeapObject* obj, bool fine_grain) {
     }
   } else if (obj->IsString()) {
     return JSObjectsCluster(Heap::String_symbol());
+  } else if (obj->IsJSGlobalPropertyCell()) {
+    return JSObjectsCluster(JSObjectsCluster::GLOBAL_PROPERTY);
+  } else if (obj->IsCode() || obj->IsSharedFunctionInfo() || obj->IsScript()) {
+    return JSObjectsCluster(JSObjectsCluster::CODE);
   }
   return JSObjectsCluster();
 }
@@ -110,6 +116,16 @@ int Clusterizer::CalculateNetworkSize(JSObject* obj) {
   if (FixedArray::cast(obj->elements())->length() != 0) {
     size += obj->elements()->Size();
   }
+  // For functions, also account non-empty context and literals sizes.
+  if (obj->IsJSFunction()) {
+    JSFunction* f = JSFunction::cast(obj);
+    if (f->unchecked_context()->IsContext()) {
+      size += f->context()->Size();
+    }
+    if (f->literals()->length() != 0) {
+      size += f->literals()->Size();
+    }
+  }
   return size;
 }
 
@@ -125,15 +141,15 @@ class ReferencesExtractor : public ObjectVisitor {
   }
 
   void VisitPointer(Object** o) {
-    if ((*o)->IsJSObject() || (*o)->IsString()) {
-      profile_->StoreReference(cluster_, HeapObject::cast(*o));
-    } else if ((*o)->IsFixedArray() && !inside_array_) {
+    if ((*o)->IsFixedArray() && !inside_array_) {
       // Traverse one level deep for data members that are fixed arrays.
       // This covers the case of 'elements' and 'properties' of JSObject,
       // and function contexts.
       inside_array_ = true;
       FixedArray::cast(*o)->Iterate(this);
       inside_array_ = false;
+    } else if ((*o)->IsHeapObject()) {
+      profile_->StoreReference(cluster_, HeapObject::cast(*o));
     }
   }
 
@@ -327,18 +343,25 @@ void ConstructorHeapProfile::PrintStats() {
 }
 
 
+static const char* GetConstructorName(const char* name) {
+  return name[0] != '\0' ? name : "(anonymous)";
+}
+
+
 void JSObjectsCluster::Print(StringStream* accumulator) const {
   ASSERT(!is_null());
   if (constructor_ == FromSpecialCase(ROOTS)) {
     accumulator->Add("(roots)");
   } else if (constructor_ == FromSpecialCase(GLOBAL_PROPERTY)) {
     accumulator->Add("(global property)");
+  } else if (constructor_ == FromSpecialCase(CODE)) {
+    accumulator->Add("(code)");
   } else if (constructor_ == FromSpecialCase(SELF)) {
     accumulator->Add("(self)");
   } else {
     SmartPointer<char> s_name(
         constructor_->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL));
-    accumulator->Add("%s", (*s_name)[0] != '\0' ? *s_name : "(anonymous)");
+    accumulator->Add("%s", GetConstructorName(*s_name));
     if (instance_ != NULL) {
       accumulator->Add(":%p", static_cast<void*>(instance_));
     }
@@ -520,6 +543,7 @@ RetainerHeapProfile::RetainerHeapProfile()
 void RetainerHeapProfile::StoreReference(const JSObjectsCluster& cluster,
                                          HeapObject* ref) {
   JSObjectsCluster ref_cluster = Clusterizer::Clusterize(ref);
+  if (ref_cluster.is_null()) return;
   JSObjectsRetainerTree::Locator ref_loc;
   if (retainers_tree_.Insert(ref_cluster, &ref_loc)) {
     ref_loc.set_value(new JSObjectsClusterTree());
@@ -530,15 +554,10 @@ void RetainerHeapProfile::StoreReference(const JSObjectsCluster& cluster,
 
 
 void RetainerHeapProfile::CollectStats(HeapObject* obj) {
-  if (obj->IsJSObject()) {
-    const JSObjectsCluster cluster = Clusterizer::Clusterize(obj);
-    ReferencesExtractor extractor(cluster, this);
-    obj->Iterate(&extractor);
-  } else if (obj->IsJSGlobalPropertyCell()) {
-    JSObjectsCluster global_prop(JSObjectsCluster::GLOBAL_PROPERTY);
-    ReferencesExtractor extractor(global_prop, this);
-    obj->Iterate(&extractor);
-  }
+  const JSObjectsCluster cluster = Clusterizer::Clusterize(obj);
+  if (cluster.is_null()) return;
+  ReferencesExtractor extractor(cluster, this);
+  obj->Iterate(&extractor);
 }
 
 
@@ -569,15 +588,34 @@ void RetainerHeapProfile::PrintStats() {
 void HeapProfiler::CollectStats(HeapObject* obj, HistogramInfo* info) {
   InstanceType type = obj->map()->instance_type();
   ASSERT(0 <= type && type <= LAST_TYPE);
-  info[type].increment_number(1);
-  info[type].increment_bytes(obj->Size());
+  if (!FreeListNode::IsFreeListNode(obj)) {
+    info[type].increment_number(1);
+    info[type].increment_bytes(obj->Size());
+  }
+}
+
+
+static void StackWeakReferenceCallback(Persistent<Value> object,
+                                       void* trace) {
+  DeleteArray(static_cast<Address*>(trace));
+  object.Dispose();
+}
+
+
+static void PrintProducerStackTrace(Object* obj, void* trace) {
+  if (!obj->IsJSObject()) return;
+  String* constructor = JSObject::cast(obj)->constructor_name();
+  SmartPointer<char> s_name(
+      constructor->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL));
+  LOG(HeapSampleJSProducerEvent(GetConstructorName(*s_name),
+                                reinterpret_cast<Address*>(trace)));
 }
 
 
 void HeapProfiler::WriteSample() {
   LOG(HeapSampleBeginEvent("Heap", "allocated"));
   LOG(HeapSampleStats(
-      "Heap", "allocated", Heap::Capacity(), Heap::SizeOfObjects()));
+      "Heap", "allocated", Heap::CommittedMemory(), Heap::SizeOfObjects()));
 
   HistogramInfo info[LAST_TYPE+1];
 #define DEF_TYPE_NAME(name) info[name].set_name(#name);
@@ -616,7 +654,37 @@ void HeapProfiler::WriteSample() {
   js_cons_profile.PrintStats();
   js_retainer_profile.PrintStats();
 
+  GlobalHandles::IterateWeakRoots(PrintProducerStackTrace,
+                                  StackWeakReferenceCallback);
+
   LOG(HeapSampleEndEvent("Heap", "allocated"));
+}
+
+
+bool ProducerHeapProfile::can_log_ = false;
+
+void ProducerHeapProfile::Setup() {
+  can_log_ = true;
+}
+
+void ProducerHeapProfile::RecordJSObjectAllocation(Object* obj) {
+  if (!can_log_ || !FLAG_log_producers) return;
+  int framesCount = 0;
+  for (JavaScriptFrameIterator it; !it.done(); it.Advance()) {
+    ++framesCount;
+  }
+  if (framesCount == 0) return;
+  ++framesCount;  // Reserve place for the terminator item.
+  Vector<Address> stack(NewArray<Address>(framesCount), framesCount);
+  int i = 0;
+  for (JavaScriptFrameIterator it; !it.done(); it.Advance()) {
+    stack[i++] = it.frame()->pc();
+  }
+  stack[i] = NULL;
+  Handle<Object> handle = GlobalHandles::Create(obj);
+  GlobalHandles::MakeWeak(handle.location(),
+                          static_cast<void*>(stack.start()),
+                          StackWeakReferenceCallback);
 }
 
 

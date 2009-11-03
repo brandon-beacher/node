@@ -45,7 +45,7 @@ bool V8::has_been_setup_ = false;
 bool V8::has_been_disposed_ = false;
 bool V8::has_fatal_error_ = false;
 
-bool V8::Initialize(Deserializer *des) {
+bool V8::Initialize(GenericDeserializer *des) {
   bool create_heap_objects = des == NULL;
   if (has_been_disposed_ || has_fatal_error_) return false;
   if (IsRunning()) return true;
@@ -178,11 +178,14 @@ bool V8::IdleNotification() {
   return Heap::IdleNotification();
 }
 
+static const uint32_t kRandomPositiveSmiMax = 0x3fffffff;
 
 Smi* V8::RandomPositiveSmi() {
   uint32_t random = Random();
-  ASSERT(IsPowerOf2(Smi::kMaxValue + 1));
-  return Smi::FromInt(random & Smi::kMaxValue);
+  ASSERT(static_cast<uint32_t>(Smi::kMaxValue) >= kRandomPositiveSmiMax);
+  // kRandomPositiveSmiMax must match the value being divided
+  // by in math.js.
+  return Smi::FromInt(random & kRandomPositiveSmiMax);
 }
 
 } }  // namespace v8::internal

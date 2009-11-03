@@ -10,25 +10,28 @@
 #include <errno.h>
 #include <dlfcn.h> /* dlopen(), dlsym() */
 
-#include <events.h>
-#include <dns.h>
-#include <net.h>
-#include <file.h>
-#include <http.h>
-#include <signal_handler.h>
-#include <timer.h>
-#include <child_process.h>
-#include <constants.h>
+#include <node_events.h>
+#include <node_dns.h>
+#include <node_net.h>
+#include <node_file.h>
+#include <node_http.h>
+#include <node_signal_handler.h>
+#include <node_timer.h>
+#include <node_child_process.h>
+#include <node_constants.h>
 #include <node_stdio.h>
 #include <node_natives.h>
-#include <v8-debug.h>
 #include <node_version.h>
+
+#include <v8-debug.h>
 
 using namespace v8;
 
 extern char **environ;
 
 namespace node {
+
+static Persistent<Object> process;
 
 static int dash_dash_index = 0;
 static bool use_debug_agent = false;
@@ -250,19 +253,175 @@ v8::Handle<v8::Value> Exit(const v8::Arguments& args) {
   return Undefined();
 }
 
+#ifdef __APPLE__
+#define HAVE_GETMEM 1
+/* Researched by Tim Becker and Michael Knight
+ * http://blog.kuriositaet.de/?p=257
+ */
+
+#include <mach/task.h>
+#include <mach/mach_init.h>
+
+int getmem(size_t *rss, size_t *vsize) {
+  task_t task = MACH_PORT_NULL;
+  struct task_basic_info t_info;
+  mach_msg_type_number_t t_info_count = TASK_BASIC_INFO_COUNT;
+
+  int r = task_info(mach_task_self(),
+                    TASK_BASIC_INFO,
+                    (task_info_t)&t_info,
+                    &t_info_count);
+
+  if (r != KERN_SUCCESS) return -1;
+
+  *rss = t_info.resident_size;
+  *vsize  = t_info.virtual_size;
+
+  return 0;
+}
+#endif  // __APPLE__
+
+#ifdef __linux__
+# define HAVE_GETMEM 1
+# include <sys/param.h> /* for MAXPATHLEN */
+# include <sys/user.h> /* for PAGE_SIZE */
+
+int getmem(size_t *rss, size_t *vsize) {
+  FILE *f = fopen("/proc/self/stat", "r");
+  if (!f) return -1;
+
+  int itmp;
+  char ctmp;
+  char buffer[MAXPATHLEN];
+
+  /* PID */
+  if (fscanf(f, "%d ", &itmp) == 0) goto error;
+  /* Exec file */
+  if (fscanf (f, "%s ", &buffer[0]) == 0) goto error;
+  /* State */
+  if (fscanf (f, "%c ", &ctmp) == 0) goto error;
+  /* Parent process */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* Process group */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* Session id */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* TTY */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* TTY owner process group */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* Flags */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* Minor faults (no memory page) */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* Minor faults, children */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* Major faults (memory page faults) */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* Major faults, children */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* utime */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* stime */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* utime, children */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* stime, children */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* jiffies remaining in current time slice */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* 'nice' value */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+  /* jiffies until next timeout */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* jiffies until next SIGALRM */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* start time (jiffies since system boot) */
+  if (fscanf (f, "%d ", &itmp) == 0) goto error;
+
+  /* Virtual memory size */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  *vsize = (size_t) itmp;
+
+  /* Resident set size */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  *rss = (size_t) itmp * PAGE_SIZE;
+
+  /* rlim */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* Start of text */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* End of text */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+  /* Start of stack */
+  if (fscanf (f, "%u ", &itmp) == 0) goto error;
+
+  fclose (f);
+
+  return 0;
+
+error:
+  fclose (f);
+  return -1;
+}
+#endif  // __linux__
+
+v8::Handle<v8::Value> MemoryUsage(const v8::Arguments& args) {
+  HandleScope scope;
+
+#ifndef HAVE_GETMEM
+  return ThrowException(Exception::Error(String::New("Not support on your platform. (Talk to Ryan.)")));
+#else
+  size_t rss, vsize;
+
+  int r = getmem(&rss, &vsize);
+
+  if (r != 0) {
+    return ThrowException(Exception::Error(String::New(strerror(errno))));
+  }
+
+  Local<Object> info = Object::New();
+
+  info->Set(String::NewSymbol("rss"), Integer::NewFromUnsigned(rss));
+  info->Set(String::NewSymbol("vsize"), Integer::NewFromUnsigned(vsize));
+
+  return scope.Close(info);
+#endif
+}
+
+
 v8::Handle<v8::Value> Kill(const v8::Arguments& args) {
   HandleScope scope;
   
-  if (args.Length() != 2 || !args[0]->IsNumber() || !args[1]->IsInt32()) {
+  if (args.Length() < 1 || !args[0]->IsNumber()) {
     return ThrowException(Exception::Error(String::New("Bad argument.")));
   }
   
   pid_t pid = args[0]->IntegerValue();
-  int sig = args[1]->Int32Value();
-  
-  Local<Integer> result = Integer::New(kill(pid, sig));
 
-  return scope.Close(result);
+  int sig = SIGTERM;
+
+  if (args.Length() >= 2) {
+    if (args[1]->IsNumber()) {
+      sig = args[1]->Int32Value();
+    } else if (args[1]->IsString()) {
+      Local<String> signame = args[1]->ToString();
+
+      Local<Value> sig_v = process->Get(signame);
+      if (!sig_v->IsNumber()) {
+        return ThrowException(Exception::Error(String::New("Unknown signal")));
+      }
+      sig = sig_v->Int32Value();
+    }
+  }
+
+  int r = kill(pid, sig);
+
+  if (r != 0) {
+    return ThrowException(Exception::Error(String::New(strerror(errno))));
+  }
+
+  return Undefined();
 }
 
 typedef void (*extInit)(Handle<Object> exports);
@@ -397,16 +556,24 @@ static void ExecuteNativeJS(const char *filename, const char *data) {
 static Local<Object> Load(int argc, char *argv[]) {
   HandleScope scope;
 
-  // Reference to 'process'
-  Local<Object> process = Context::GetCurrent()->Global();
+  Local<FunctionTemplate> process_template = FunctionTemplate::New();
+  node::EventEmitter::Initialize(process_template);
 
-  Local<Object> node_obj = Object::New(); // Create the 'process.node' object
-  process->Set(String::NewSymbol("node"), node_obj); // and assign it.
+  process = Persistent<Object>::New(process_template->GetFunction()->NewInstance());
 
-  // node.version
-  node_obj->Set(String::NewSymbol("version"), String::New(NODE_VERSION));
-  // node.installPrefix
-  node_obj->Set(String::NewSymbol("installPrefix"), String::New(NODE_PREFIX));
+  // Assign the process object to its place.
+  Local<Object> global = Context::GetCurrent()->Global();
+  global->Set(String::NewSymbol("process"), process);
+
+  // process.version
+  process->Set(String::NewSymbol("version"), String::New(NODE_VERSION));
+  // process.installPrefix
+  process->Set(String::NewSymbol("installPrefix"), String::New(NODE_PREFIX));
+
+  // process.platform
+#define xstr(s) str(s)
+#define str(s) #s
+  process->Set(String::NewSymbol("platform"), String::New(xstr(PLATFORM)));
 
   // process.ARGV
   int i, j;
@@ -438,40 +605,41 @@ static Local<Object> Load(int argc, char *argv[]) {
   process->Set(String::NewSymbol("pid"), Integer::New(getpid()));
 
   // define various internal methods
-  NODE_SET_METHOD(node_obj, "compile", Compile);
-  NODE_SET_METHOD(node_obj, "reallyExit", Exit);
-  NODE_SET_METHOD(node_obj, "cwd", Cwd);
-  NODE_SET_METHOD(node_obj, "dlopen", DLOpen);
-  NODE_SET_METHOD(node_obj, "kill", Kill);
+  NODE_SET_METHOD(process, "compile", Compile);
+  NODE_SET_METHOD(process, "reallyExit", Exit);
+  NODE_SET_METHOD(process, "cwd", Cwd);
+  NODE_SET_METHOD(process, "dlopen", DLOpen);
+  NODE_SET_METHOD(process, "kill", Kill);
+  NODE_SET_METHOD(process, "memoryUsage", MemoryUsage);
 
   // Assign the EventEmitter. It was created in main().
-  node_obj->Set(String::NewSymbol("EventEmitter"),
-              EventEmitter::constructor_template->GetFunction());
+  process->Set(String::NewSymbol("EventEmitter"),
+               EventEmitter::constructor_template->GetFunction());
 
   // Initialize the C++ modules..................filename of module
-  Promise::Initialize(node_obj);                // events.cc
-  Stdio::Initialize(node_obj);                  // stdio.cc
-  Timer::Initialize(node_obj);                  // timer.cc
-  SignalHandler::Initialize(node_obj);          // signal_handler.cc
-  ChildProcess::Initialize(node_obj);           // child_process.cc
-  DefineConstants(node_obj);                    // constants.cc
+  Promise::Initialize(process);                // events.cc
+  Stdio::Initialize(process);                  // stdio.cc
+  Timer::Initialize(process);                  // timer.cc
+  SignalHandler::Initialize(process);          // signal_handler.cc
+  ChildProcess::Initialize(process);           // child_process.cc
+  DefineConstants(process);                    // constants.cc
   // Create node.dns
   Local<Object> dns = Object::New();
-  node_obj->Set(String::NewSymbol("dns"), dns);
+  process->Set(String::NewSymbol("dns"), dns);
   DNS::Initialize(dns);                         // dns.cc
   Local<Object> fs = Object::New();
-  node_obj->Set(String::NewSymbol("fs"), fs);
+  process->Set(String::NewSymbol("fs"), fs);
   File::Initialize(fs);                         // file.cc
   // Create node.tcp. Note this separate from lib/tcp.js which is the public
   // frontend.
   Local<Object> tcp = Object::New();
-  node_obj->Set(String::New("tcp"), tcp);
+  process->Set(String::New("tcp"), tcp);
   Server::Initialize(tcp);                      // tcp.cc
   Connection::Initialize(tcp);                  // tcp.cc
   // Create node.http.  Note this separate from lib/http.js which is the
   // public frontend.
   Local<Object> http = Object::New();
-  node_obj->Set(String::New("http"), http);
+  process->Set(String::New("http"), http);
   HTTPServer::Initialize(http);                 // http.cc
   HTTPConnection::Initialize(http);             // http.cc
 
@@ -483,16 +651,12 @@ static Local<Object> Load(int argc, char *argv[]) {
   // In node.js we actually load the file specified in ARGV[1]
   // so your next reading stop should be node.js!
   ExecuteNativeJS("node.js", native_node);
-
-  return scope.Close(node_obj);
 }
 
 static void EmitExitEvent() {
   HandleScope scope;
 
-  // Get reference to 'process' object.
-  Local<Object> process = Context::GetCurrent()->Global();
-  // Get the 'emit' function from it.
+  // Get the 'emit' function from 'process'
   Local<Value> emit_v = process->Get(String::NewSymbol("emit"));
   if (!emit_v->IsFunction()) {
     // could not emit exit event so exit
@@ -621,26 +785,20 @@ int main(int argc, char *argv[]) {
            "Use 'd8 --remote_debugger' to access it.\n");
   }
 
-  // Create the global 'process' object's FunctionTemplate.
-  Local<FunctionTemplate> process_template = FunctionTemplate::New();
-
-  // The global object (process) is an instance of EventEmitter. For some
-  // strange and forgotten reasons we must initialize EventEmitter now
-  // before creating the Context. EventEmitter will be assigned to it's
-  // namespace node.EventEmitter in Load() bellow.
-  node::EventEmitter::Initialize(process_template);
+  // Create the 'GLOBAL' object's FunctionTemplate.
+  Local<FunctionTemplate> global_template = FunctionTemplate::New();
 
   // Create the one and only Context.
   Persistent<Context> context = Context::New(NULL,
-      process_template->InstanceTemplate());
+      global_template->InstanceTemplate());
   Context::Scope context_scope(context);
 
-  // Actually assign the global object to it's place as 'process'
-  context->Global()->Set(String::NewSymbol("process"), context->Global());
+  // Actually assign the global object to it's place as 'GLOBAL'
+  context->Global()->Set(String::NewSymbol("GLOBAL"), context->Global());
 
   // Create all the objects, load modules, do everything.
   // so your next reading stop should be node::Load()!
-  Local<Object> node_obj = node::Load(argc, argv);
+  node::Load(argc, argv);
 
   // All our arguments are loaded. We've evaluated all of the scripts. We
   // might even have created TCP servers. Now we enter the main event loop.

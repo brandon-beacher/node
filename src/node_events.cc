@@ -1,5 +1,5 @@
 // Copyright 2009 Ryan Dahl <ry@tinyclouds.org>
-#include <events.h>
+#include <node_events.h>
 
 #include <assert.h>
 #include <stdlib.h>
@@ -17,10 +17,6 @@
 #include <v8.h>
 
 namespace node {
-
-#ifndef RAMP
-# define RAMP(x) ((x) > 0 ? (x) : 0)
-#endif
 
 using namespace v8;
 
@@ -209,16 +205,22 @@ void Promise::Detach(void) {
 }
 
 bool Promise::EmitSuccess(int argc, v8::Handle<v8::Value> argv[]) {
+  if (has_fired_) return false;
+
   bool r = Emit("success", argc, argv);
 
+  has_fired_ = true;
   Detach();
 
   return r;
 }
 
 bool Promise::EmitError(int argc, v8::Handle<v8::Value> argv[]) {
+  if (has_fired_) return false;
+
   bool r = Emit("error", argc, argv);
 
+  has_fired_ = true;
   Detach();
 
   return r;

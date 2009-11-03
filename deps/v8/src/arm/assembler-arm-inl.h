@@ -110,7 +110,7 @@ Address* RelocInfo::target_reference_address() {
 
 
 Address RelocInfo::call_address() {
-  ASSERT(IsCallInstruction());
+  ASSERT(IsPatchedReturnSequence());
   // The 2 instructions offset assumes patched return sequence.
   ASSERT(IsJSReturn(rmode()));
   return Memory::Address_at(pc_ + 2 * Assembler::kInstrSize);
@@ -118,7 +118,7 @@ Address RelocInfo::call_address() {
 
 
 void RelocInfo::set_call_address(Address target) {
-  ASSERT(IsCallInstruction());
+  ASSERT(IsPatchedReturnSequence());
   // The 2 instructions offset assumes patched return sequence.
   ASSERT(IsJSReturn(rmode()));
   Memory::Address_at(pc_ + 2 * Assembler::kInstrSize) = target;
@@ -131,7 +131,7 @@ Object* RelocInfo::call_object() {
 
 
 Object** RelocInfo::call_object_address() {
-  ASSERT(IsCallInstruction());
+  ASSERT(IsPatchedReturnSequence());
   // The 2 instructions offset assumes patched return sequence.
   ASSERT(IsJSReturn(rmode()));
   return reinterpret_cast<Object**>(pc_ + 2 * Assembler::kInstrSize);
@@ -143,7 +143,7 @@ void RelocInfo::set_call_object(Object* target) {
 }
 
 
-bool RelocInfo::IsCallInstruction() {
+bool RelocInfo::IsPatchedReturnSequence() {
   // On ARM a "call instruction" is actually two instructions.
   //   mov lr, pc
   //   ldr pc, [pc, #XXX]
@@ -242,6 +242,12 @@ Address Assembler::target_address_address_at(Address pc) {
 
 Address Assembler::target_address_at(Address pc) {
   return Memory::Address_at(target_address_address_at(pc));
+}
+
+
+void Assembler::set_target_at(Address constant_pool_entry,
+                              Address target) {
+  Memory::Address_at(constant_pool_entry) = target;
 }
 
 

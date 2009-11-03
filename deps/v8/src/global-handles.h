@@ -54,6 +54,8 @@ class ObjectGroup : public Malloced {
 };
 
 
+typedef void (*WeakReferenceGuest)(Object* object, void* parameter);
+
 class GlobalHandles : public AllStatic {
  public:
   // Creates a new global handle that is alive until Destroy is called.
@@ -99,6 +101,10 @@ class GlobalHandles : public AllStatic {
   // Iterates over all weak roots in heap.
   static void IterateWeakRoots(ObjectVisitor* v);
 
+  // Iterates over weak roots that are bound to a given callback.
+  static void IterateWeakRoots(WeakReferenceGuest f,
+                               WeakReferenceCallback callback);
+
   // Find all weak handles satisfying the callback predicate, mark
   // them as pending.
   static void IdentifyWeakHandles(WeakSlotCallback f);
@@ -121,6 +127,7 @@ class GlobalHandles : public AllStatic {
   static void PrintStats();
   static void Print();
 #endif
+  class Pool;
  private:
   // Internal node structure, one for each global handle.
   class Node;
@@ -142,6 +149,23 @@ class GlobalHandles : public AllStatic {
   static Node* first_free_;
   static Node* first_free() { return first_free_; }
   static void set_first_free(Node* value) { first_free_ = value; }
+
+  // List of deallocated nodes.
+  // Deallocated nodes form a prefix of all the nodes and
+  // |first_deallocated| points to last deallocated node before
+  // |head|.  Those deallocated nodes are additionally linked
+  // by |next_free|:
+  //                                    1st deallocated  head
+  //                                           |          |
+  //                                           V          V
+  //    node          node        ...         node       node
+  //      .next      -> .next ->                .next ->
+  //   <- .next_free <- .next_free           <- .next_free
+  static Node* first_deallocated_;
+  static Node* first_deallocated() { return first_deallocated_; }
+  static void set_first_deallocated(Node* value) {
+    first_deallocated_ = value;
+  }
 };
 
 

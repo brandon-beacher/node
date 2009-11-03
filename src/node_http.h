@@ -1,8 +1,8 @@
 #ifndef node_http_h
 #define node_http_h
 
+#include <node_net.h>
 #include <v8.h>
-#include "net.h"
 #include <http_parser.h>
 
 namespace node {
@@ -36,6 +36,7 @@ protected:
   }
 
   void OnReceive (const void *buf, size_t len);
+  void OnEOF ();
 
   static int on_message_begin (http_parser *parser);
   static int on_uri (http_parser *parser, const char *at, size_t length);

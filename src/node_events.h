@@ -2,7 +2,7 @@
 #ifndef SRC_EVENTS_H_
 #define SRC_EVENTS_H_
 
-#include <object_wrap.h>
+#include <node_object_wrap.h>
 #include <v8.h>
 
 namespace node {
@@ -43,12 +43,14 @@ class Promise : public EventEmitter {
 
   virtual void Detach(void);
 
+  bool has_fired_;
   bool blocking_;
   Promise *prev_; /* for the prev in the Poor Man's coroutine stack */
 
   void Destack();
 
   Promise() : EventEmitter() {
+    has_fired_ = false;
     blocking_ = false;
     prev_ = NULL;
   }

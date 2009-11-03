@@ -32,6 +32,7 @@
 #include "compilation-cache.h"
 #include "compiler.h"
 #include "debug.h"
+#include "fast-codegen.h"
 #include "oprofile-agent.h"
 #include "rewriter.h"
 #include "scopes.h"
@@ -39,6 +40,44 @@
 
 namespace v8 {
 namespace internal {
+
+
+class CodeGenSelector: public AstVisitor {
+ public:
+  enum CodeGenTag { NORMAL, FAST };
+
+  CodeGenSelector()
+      : has_supported_syntax_(true),
+        location_(Location::Uninitialized()) {
+  }
+
+  CodeGenTag Select(FunctionLiteral* fun);
+
+ private:
+  void VisitDeclarations(ZoneList<Declaration*>* decls);
+  void VisitStatements(ZoneList<Statement*>* stmts);
+
+  // Visit an expression in effect context with a desired location of
+  // nowhere.
+  void VisitAsEffect(Expression* expr);
+
+  // Visit an expression in value context with a desired location of
+  // temporary.
+  void VisitAsValue(Expression* expr);
+
+  // AST node visit functions.
+#define DECLARE_VISIT(type) virtual void Visit##type(type* node);
+  AST_NODE_LIST(DECLARE_VISIT)
+#undef DECLARE_VISIT
+
+  bool has_supported_syntax_;
+
+  // The desired location of the currently visited expression.
+  Location location_;
+
+  DISALLOW_COPY_AND_ASSIGN(CodeGenSelector);
+};
+
 
 static Handle<Code> MakeCode(FunctionLiteral* literal,
                              Handle<Script> script,
@@ -79,8 +118,15 @@ static Handle<Code> MakeCode(FunctionLiteral* literal,
   }
 
   // Generate code and return it.
-  Handle<Code> result = CodeGenerator::MakeCode(literal, script, is_eval);
-  return result;
+  if (FLAG_fast_compiler) {
+    CodeGenSelector selector;
+    CodeGenSelector::CodeGenTag code_gen = selector.Select(literal);
+    if (code_gen == CodeGenSelector::FAST) {
+      return FastCodeGenerator::MakeCode(literal, script, is_eval);
+    }
+    ASSERT(code_gen == CodeGenSelector::NORMAL);
+  }
+  return CodeGenerator::MakeCode(literal, script, is_eval);
 }
 
 
@@ -197,7 +243,6 @@ static Handle<JSFunction> MakeFunction(bool is_global,
   Handle<JSFunction> fun =
       Factory::NewFunctionBoilerplate(lit->name(),
                                       lit->materialized_literal_count(),
-                                      lit->contains_array_literal(),
                                       code);
 
   ASSERT_EQ(RelocInfo::kNoPosition, lit->function_token_position());
@@ -415,6 +460,443 @@ bool Compiler::CompileLazy(Handle<SharedFunctionInfo> shared,
   ASSERT(shared->is_compiled());
   return true;
 }
+
+
+CodeGenSelector::CodeGenTag CodeGenSelector::Select(FunctionLiteral* fun) {
+  Scope* scope = fun->scope();
+
+  if (!scope->is_global_scope()) {
+    if (FLAG_trace_bailout) PrintF("Non-global scope\n");
+    return NORMAL;
+  }
+  ASSERT(scope->num_heap_slots() == 0);
+  ASSERT(scope->arguments() == NULL);
+
+  has_supported_syntax_ = true;
+  VisitDeclarations(fun->scope()->declarations());
+  if (!has_supported_syntax_) return NORMAL;
+
+  VisitStatements(fun->body());
+  return has_supported_syntax_ ? FAST : NORMAL;
+}
+
+
+#define BAILOUT(reason)                         \
+  do {                                          \
+    if (FLAG_trace_bailout) {                   \
+      PrintF("%s\n", reason);                   \
+    }                                           \
+    has_supported_syntax_ = false;              \
+    return;                                     \
+  } while (false)
+
+
+#define CHECK_BAILOUT                           \
+  do {                                          \
+    if (!has_supported_syntax_) return;         \
+  } while (false)
+
+
+void CodeGenSelector::VisitDeclarations(ZoneList<Declaration*>* decls) {
+  for (int i = 0; i < decls->length(); i++) {
+    Visit(decls->at(i));
+    CHECK_BAILOUT;
+  }
+}
+
+
+void CodeGenSelector::VisitStatements(ZoneList<Statement*>* stmts) {
+  for (int i = 0, len = stmts->length(); i < len; i++) {
+    Visit(stmts->at(i));
+    CHECK_BAILOUT;
+  }
+}
+
+
+void CodeGenSelector::VisitAsEffect(Expression* expr) {
+  if (location_.is_effect()) {
+    Visit(expr);
+  } else {
+    Location saved = location_;
+    location_ = Location::Effect();
+    Visit(expr);
+    location_ = saved;
+  }
+}
+
+
+void CodeGenSelector::VisitAsValue(Expression* expr) {
+  if (location_.is_value()) {
+    Visit(expr);
+  } else {
+    Location saved = location_;
+    location_ = Location::Value();
+    Visit(expr);
+    location_ = saved;
+  }
+}
+
+
+void CodeGenSelector::VisitDeclaration(Declaration* decl) {
+  Variable* var = decl->proxy()->var();
+  if (!var->is_global() || var->mode() == Variable::CONST) {
+    BAILOUT("Non-global declaration");
+  }
+}
+
+
+void CodeGenSelector::VisitBlock(Block* stmt) {
+  VisitStatements(stmt->statements());
+}
+
+
+void CodeGenSelector::VisitExpressionStatement(ExpressionStatement* stmt) {
+  VisitAsEffect(stmt->expression());
+}
+
+
+void CodeGenSelector::VisitEmptyStatement(EmptyStatement* stmt) {
+  // EmptyStatement is supported.
+}
+
+
+void CodeGenSelector::VisitIfStatement(IfStatement* stmt) {
+  BAILOUT("IfStatement");
+}
+
+
+void CodeGenSelector::VisitContinueStatement(ContinueStatement* stmt) {
+  BAILOUT("ContinueStatement");
+}
+
+
+void CodeGenSelector::VisitBreakStatement(BreakStatement* stmt) {
+  BAILOUT("BreakStatement");
+}
+
+
+void CodeGenSelector::VisitReturnStatement(ReturnStatement* stmt) {
+  VisitAsValue(stmt->expression());
+}
+
+
+void CodeGenSelector::VisitWithEnterStatement(WithEnterStatement* stmt) {
+  BAILOUT("WithEnterStatement");
+}
+
+
+void CodeGenSelector::VisitWithExitStatement(WithExitStatement* stmt) {
+  BAILOUT("WithExitStatement");
+}
+
+
+void CodeGenSelector::VisitSwitchStatement(SwitchStatement* stmt) {
+  BAILOUT("SwitchStatement");
+}
+
+
+void CodeGenSelector::VisitDoWhileStatement(DoWhileStatement* stmt) {
+  BAILOUT("DoWhileStatement");
+}
+
+
+void CodeGenSelector::VisitWhileStatement(WhileStatement* stmt) {
+  BAILOUT("WhileStatement");
+}
+
+
+void CodeGenSelector::VisitForStatement(ForStatement* stmt) {
+  BAILOUT("ForStatement");
+}
+
+
+void CodeGenSelector::VisitForInStatement(ForInStatement* stmt) {
+  BAILOUT("ForInStatement");
+}
+
+
+void CodeGenSelector::VisitTryCatchStatement(TryCatchStatement* stmt) {
+  BAILOUT("TryCatchStatement");
+}
+
+
+void CodeGenSelector::VisitTryFinallyStatement(TryFinallyStatement* stmt) {
+  BAILOUT("TryFinallyStatement");
+}
+
+
+void CodeGenSelector::VisitDebuggerStatement(DebuggerStatement* stmt) {
+  BAILOUT("DebuggerStatement");
+}
+
+
+void CodeGenSelector::VisitFunctionLiteral(FunctionLiteral* expr) {
+  if (!expr->AllowsLazyCompilation()) {
+    BAILOUT("FunctionLiteral does not allow lazy compilation");
+  }
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitFunctionBoilerplateLiteral(
+    FunctionBoilerplateLiteral* expr) {
+  BAILOUT("FunctionBoilerplateLiteral");
+}
+
+
+void CodeGenSelector::VisitConditional(Conditional* expr) {
+  BAILOUT("Conditional");
+}
+
+
+void CodeGenSelector::VisitSlot(Slot* expr) {
+  UNREACHABLE();
+}
+
+
+void CodeGenSelector::VisitVariableProxy(VariableProxy* expr) {
+  Expression* rewrite = expr->var()->rewrite();
+  // A rewrite of NULL indicates a global variable.
+  if (rewrite != NULL) {
+    // Non-global.
+    Slot* slot = rewrite->AsSlot();
+    if (slot == NULL) {
+      // This is a variable rewritten to an explicit property access
+      // on the arguments object.
+      BAILOUT("non-global/non-slot variable reference");
+    }
+
+    Slot::Type type = slot->type();
+    if (type != Slot::PARAMETER && type != Slot::LOCAL) {
+      BAILOUT("non-parameter/non-local slot reference");
+    }
+  }
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitLiteral(Literal* expr) {
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitRegExpLiteral(RegExpLiteral* expr) {
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitObjectLiteral(ObjectLiteral* expr) {
+  ZoneList<ObjectLiteral::Property*>* properties = expr->properties();
+
+  for (int i = 0, len = properties->length(); i < len; i++) {
+    ObjectLiteral::Property* property = properties->at(i);
+    if (property->IsCompileTimeValue()) continue;
+
+    switch (property->kind()) {
+      case ObjectLiteral::Property::CONSTANT:
+        UNREACHABLE();
+
+      // For (non-compile-time) materialized literals and computed
+      // properties with symbolic keys we will use an IC and therefore not
+      // generate code for the key.
+      case ObjectLiteral::Property::COMPUTED:  // Fall through.
+      case ObjectLiteral::Property::MATERIALIZED_LITERAL:
+        if (property->key()->handle()->IsSymbol()) {
+          break;
+        }
+        // Fall through.
+
+      // In all other cases we need the key's value on the stack
+      // for a runtime call.  (Relies on TEMP meaning STACK.)
+      case ObjectLiteral::Property::GETTER:  // Fall through.
+      case ObjectLiteral::Property::SETTER:  // Fall through.
+      case ObjectLiteral::Property::PROTOTYPE:
+        VisitAsValue(property->key());
+        CHECK_BAILOUT;
+        break;
+    }
+    VisitAsValue(property->value());
+    CHECK_BAILOUT;
+  }
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitArrayLiteral(ArrayLiteral* expr) {
+  ZoneList<Expression*>* subexprs = expr->values();
+  for (int i = 0, len = subexprs->length(); i < len; i++) {
+    Expression* subexpr = subexprs->at(i);
+    if (subexpr->AsLiteral() != NULL) continue;
+    if (CompileTimeValue::IsCompileTimeValue(subexpr)) continue;
+    VisitAsValue(subexpr);
+    CHECK_BAILOUT;
+  }
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitCatchExtensionObject(CatchExtensionObject* expr) {
+  BAILOUT("CatchExtensionObject");
+}
+
+
+void CodeGenSelector::VisitAssignment(Assignment* expr) {
+  // We support plain non-compound assignments to parameters and
+  // non-context (stack-allocated) locals.
+  if (expr->starts_initialization_block() ||
+      expr->ends_initialization_block()) {
+    BAILOUT("initialization block start");
+  }
+
+  Token::Value op = expr->op();
+  if (op == Token::INIT_CONST) BAILOUT("initialize constant");
+  if (op != Token::ASSIGN && op != Token::INIT_VAR) {
+    BAILOUT("compound assignment");
+  }
+
+  Variable* var = expr->target()->AsVariableProxy()->AsVariable();
+  if (var == NULL) BAILOUT("non-variable assignment");
+
+  if (!var->is_global()) {
+    ASSERT(var->slot() != NULL);
+    Slot::Type type = var->slot()->type();
+    if (type != Slot::PARAMETER && type != Slot::LOCAL) {
+      BAILOUT("non-parameter/non-local slot assignment");
+    }
+  }
+
+  VisitAsValue(expr->value());
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitThrow(Throw* expr) {
+  BAILOUT("Throw");
+}
+
+
+void CodeGenSelector::VisitProperty(Property* expr) {
+  VisitAsValue(expr->obj());
+  CHECK_BAILOUT;
+  VisitAsValue(expr->key());
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitCall(Call* expr) {
+  Expression* fun = expr->expression();
+  ZoneList<Expression*>* args = expr->arguments();
+  Variable* var = fun->AsVariableProxy()->AsVariable();
+
+  // Check for supported calls
+  if (var != NULL && var->is_possibly_eval()) {
+    BAILOUT("Call to a function named 'eval'");
+  } else if (var != NULL && !var->is_this() && var->is_global()) {
+    // ----------------------------------
+    // JavaScript example: 'foo(1, 2, 3)'  // foo is global
+    // ----------------------------------
+  } else {
+    BAILOUT("Call to a non-global function");
+  }
+  // Check all arguments to the call.  (Relies on TEMP meaning STACK.)
+  for (int i = 0; i < args->length(); i++) {
+    VisitAsValue(args->at(i));
+    CHECK_BAILOUT;
+  }
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitCallNew(CallNew* expr) {
+  VisitAsValue(expr->expression());
+  CHECK_BAILOUT;
+  ZoneList<Expression*>* args = expr->arguments();
+  // Check all arguments to the call
+  for (int i = 0; i < args->length(); i++) {
+    VisitAsValue(args->at(i));
+    CHECK_BAILOUT;
+  }
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitCallRuntime(CallRuntime* expr) {
+  // In case of JS runtime function bail out.
+  if (expr->function() == NULL) BAILOUT("call JS runtime function");
+  // Check for inline runtime call
+  if (expr->name()->Get(0) == '_' &&
+      CodeGenerator::FindInlineRuntimeLUT(expr->name()) != NULL) {
+    BAILOUT("inlined runtime call");
+  }
+  // Check all arguments to the call.  (Relies on TEMP meaning STACK.)
+  for (int i = 0; i < expr->arguments()->length(); i++) {
+    VisitAsValue(expr->arguments()->at(i));
+    CHECK_BAILOUT;
+  }
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitUnaryOperation(UnaryOperation* expr) {
+  BAILOUT("UnaryOperation");
+}
+
+
+void CodeGenSelector::VisitCountOperation(CountOperation* expr) {
+  BAILOUT("CountOperation");
+}
+
+
+void CodeGenSelector::VisitBinaryOperation(BinaryOperation* expr) {
+  switch (expr->op()) {
+    case Token::COMMA:
+      VisitAsEffect(expr->left());
+      CHECK_BAILOUT;
+      Visit(expr->right());  // Location is the same as the parent location.
+      break;
+
+    case Token::OR:
+      VisitAsValue(expr->left());
+      CHECK_BAILOUT;
+      // The location for the right subexpression is the same as for the
+      // whole expression so we call Visit directly.
+      Visit(expr->right());
+      break;
+
+    case Token::ADD:
+    case Token::SUB:
+    case Token::DIV:
+    case Token::MOD:
+    case Token::MUL:
+    case Token::BIT_OR:
+    case Token::BIT_AND:
+    case Token::BIT_XOR:
+    case Token::SHL:
+    case Token::SHR:
+    case Token::SAR:
+      VisitAsValue(expr->left());
+      CHECK_BAILOUT;
+      VisitAsValue(expr->right());
+      break;
+
+    default:
+      BAILOUT("Unsupported binary operation");
+  }
+  expr->set_location(location_);
+}
+
+
+void CodeGenSelector::VisitCompareOperation(CompareOperation* expr) {
+  BAILOUT("CompareOperation");
+}
+
+
+void CodeGenSelector::VisitThisFunction(ThisFunction* expr) {
+  BAILOUT("ThisFunction");
+}
+
+#undef BAILOUT
+#undef CHECK_BAILOUT
 
 
 } }  // namespace v8::internal

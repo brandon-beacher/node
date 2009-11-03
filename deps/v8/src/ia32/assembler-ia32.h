@@ -367,6 +367,10 @@ class CpuFeatures : public AllStatic {
   static void Probe();
   // Check whether a feature is supported by the target CPU.
   static bool IsSupported(Feature f) {
+    if (f == SSE2 && !FLAG_enable_sse2) return false;
+    if (f == SSE3 && !FLAG_enable_sse3) return false;
+    if (f == CMOV && !FLAG_enable_cmov) return false;
+    if (f == RDTSC && !FLAG_enable_rdtsc) return false;
     return (supported_ & (static_cast<uint64_t>(1) << f)) != 0;
   }
   // Check whether a feature is currently enabled.
@@ -434,6 +438,14 @@ class Assembler : public Malloced {
   // Read/Modify the code target in the branch/call instruction at pc.
   inline static Address target_address_at(Address pc);
   inline static void set_target_address_at(Address pc, Address target);
+
+  // This sets the branch destination (which is in the instruction on x86).
+  inline static void set_target_at(Address instruction_payload,
+                                   Address target) {
+    set_target_address_at(instruction_payload, target);
+  }
+
+  static const int kCallTargetSize = kPointerSize;
 
   // Distance between the address of the code target in the call instruction
   // and the return address
@@ -590,6 +602,7 @@ class Assembler : public Malloced {
   void shr(Register dst);
   void shr_cl(Register dst);
 
+  void subb(const Operand& dst, int8_t imm8);
   void sub(const Operand& dst, const Immediate& x);
   void sub(Register dst, const Operand& src);
   void sub(const Operand& dst, Register src);
@@ -697,6 +710,8 @@ class Assembler : public Malloced {
   void ftst();
   void fucomp(int i);
   void fucompp();
+  void fucomi(int i);
+  void fucomip();
   void fcompp();
   void fnstsw_ax();
   void fwait();

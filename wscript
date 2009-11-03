@@ -1,5 +1,4 @@
 # /usr/bin/env python
-import platform
 import re
 import Options
 import sys, os, shutil
@@ -8,7 +7,7 @@ from os.path import join, dirname, abspath
 from logging import fatal
 
 cwd = os.getcwd()
-VERSION="0.1.14"
+VERSION="0.1.16"
 APPNAME="node.js"
 
 import js2c
@@ -133,6 +132,17 @@ def configure(conf):
 
   conf.env.append_value("CCFLAGS", "-DX_STACKSIZE=%d" % (1024*64))
 
+  # LFS
+  conf.env.append_value('CCFLAGS',  '-D_LARGEFILE_SOURCE')
+  conf.env.append_value('CXXFLAGS', '-D_LARGEFILE_SOURCE')
+  conf.env.append_value('CCFLAGS',  '-D_FILE_OFFSET_BITS=64')
+  conf.env.append_value('CXXFLAGS', '-D_FILE_OFFSET_BITS=64')
+
+  # platform
+  platform_def = '-DPLATFORM=' + sys.platform
+  conf.env.append_value('CCFLAGS', platform_def)
+  conf.env.append_value('CXXFLAGS', platform_def)
+
   # Split off debug variant before adding variant specific defines
   debug_env = conf.env.copy()
   conf.set_env_name('debug', debug_env)
@@ -167,33 +177,17 @@ def build_udns(bld):
   )
 
   bld.env["CPPPATH_UDNS"] = "deps/udns"
-  bld.env["STATICLIB_UDNS"] = "udns"
-
-  bld.env_of_name('default')["STATICLIB_UDNS"] = "udns"
-  bld.env_of_name('default')["LIBPATH_UDNS"] = default_dir
+  t = join(bld.srcnode.abspath(bld.env_of_name("default")), default.target)
+  bld.env_of_name('default')["LINKFLAGS_UDNS"] = [t]
 
   if bld.env["USE_DEBUG"]:
     debug_build_dir = bld.srcnode.abspath(bld.env_of_name("debug"))
     debug_dir = join(debug_build_dir, "deps/udns")
     debug = default.clone("debug")
     debug.rule = rule % debug_dir
-    #debug.target = join(debug_dir, static_lib)
-    bld.env_of_name('debug')["STATICLIB_UDNS"] = "udns"
-    bld.env_of_name('debug')["LIBPATH_UDNS"] = debug_dir
+    t = join(bld.srcnode.abspath(bld.env_of_name("debug")), debug.target)
+    bld.env_of_name('debug')["LINKFLAGS_UDNS"] = [t]
   bld.install_files('${PREFIX}/include/node/', 'deps/udns/udns.h')
-
-# XXX Remove this when v8 defaults x86_64 to native builds
-def GuessArchitecture():
-  id = platform.machine()
-  arch = platform.architecture()[0]
-  if id.startswith('arm'):
-    return 'arm'
-  elif ('64' in id) or ('64' in arch):
-    return 'x64'
-  elif (not id) or (not re.match('(x|i[3-6])86', id) is None):
-    return 'ia32'
-  else:
-    return None
 
 def v8_cmd(bld, variant):
   scons = join(cwd, 'tools/scons/scons.py')
@@ -205,8 +199,9 @@ def v8_cmd(bld, variant):
   # cannot see symbols in the executable which are hidden, even if the
   # executable is statically linked together...
 
+  # XXX Remove this when v8 defaults x86_64 to native builds
   arch = ""
-  if GuessArchitecture() == "x64":
+  if bld.env['DEST_CPU'] == 'x86_64':
     arch = "arch=x64"
 
   if variant == "default":
@@ -237,8 +232,8 @@ def build_v8(bld):
   )
   v8.uselib = "EXECINFO"
   bld.env["CPPPATH_V8"] = "deps/v8/include"
-  bld.env_of_name('default')["STATICLIB_V8"] = "v8"
-  bld.env_of_name('default')["LINKFLAGS_V8"] = ["-pthread"]
+  t = join(bld.srcnode.abspath(bld.env_of_name("default")), v8.target)
+  bld.env_of_name('default')["LINKFLAGS_V8"] = ["-pthread", t]
 
   ### v8 debug
   if bld.env["USE_DEBUG"]:
@@ -246,8 +241,8 @@ def build_v8(bld):
     v8_debug.rule   = v8_cmd(bld, "debug")
     v8_debug.target = bld.env["staticlib_PATTERN"] % "v8_g"
     v8_debug.uselib = "EXECINFO"
-    bld.env_of_name('debug')["STATICLIB_V8"] = "v8_g"
-    bld.env_of_name('debug')["LINKFLAGS_V8"] = ["-pthread"]
+    t = join(bld.srcnode.abspath(bld.env_of_name("debug")), v8_debug.target)
+    bld.env_of_name('debug')["LINKFLAGS_V8"] = ["-pthread", t]
 
   bld.install_files('${PREFIX}/include/node/', 'deps/v8/include/*.h')
 
@@ -258,7 +253,7 @@ def build(bld):
   build_v8(bld)
 
   ### evcom
-  evcom = bld.new_task_gen("cc", "staticlib")
+  evcom = bld.new_task_gen("cc")
   evcom.source = "deps/evcom/evcom.c"
   evcom.includes = "deps/evcom/ deps/libev/"
   evcom.name = "evcom"
@@ -270,7 +265,7 @@ def build(bld):
   bld.install_files('${PREFIX}/include/node/', 'deps/evcom/evcom.h')
 
   ### http_parser
-  http_parser = bld.new_task_gen("cc", "staticlib")
+  http_parser = bld.new_task_gen("cc")
   http_parser.source = "deps/http_parser/http_parser.c"
   http_parser.includes = "deps/http_parser/"
   http_parser.name = "http_parser"
@@ -280,7 +275,7 @@ def build(bld):
     http_parser.clone("debug")
 
   ### coupling
-  coupling = bld.new_task_gen("cc", "staticlib")
+  coupling = bld.new_task_gen("cc")
   coupling.source = "deps/coupling/coupling.c"
   coupling.includes = "deps/coupling/"
   coupling.name = "coupling"
@@ -304,12 +299,18 @@ def build(bld):
       src/node.js
     """,
     target="src/node_natives.h",
-    rule=javascript_in_c,
     before="cxx"
   )
   native_cc.install_path = None
+
+  # Add the rule /after/ cloning the debug
+  # This is a work around for an error had in python 2.4.3 (I'll paste the
+  # error that was had into the git commit meessage. git-blame to find out
+  # where.)
   if bld.env["USE_DEBUG"]:
-    native_cc.clone("debug")
+    native_cc_debug = native_cc.clone("debug")
+    native_cc_debug.rule = javascript_in_c
+  native_cc.rule = javascript_in_c
 
   ### node lib
   node = bld.new_task_gen("cxx", "program")
@@ -317,16 +318,16 @@ def build(bld):
   node.target       = "node"
   node.source = """
     src/node.cc
-    src/events.cc
-    src/http.cc
-    src/net.cc
+    src/node_child_process.cc
+    src/node_constants.cc
+    src/node_dns.cc
+    src/node_events.cc
+    src/node_file.cc
+    src/node_http.cc
+    src/node_net.cc
+    src/node_signal_handler.cc
     src/node_stdio.cc
-    src/dns.cc
-    src/file.cc
-    src/signal_handler.cc
-    src/timer.cc
-    src/child_process.cc
-    src/constants.cc
+    src/node_timer.cc
   """
   node.includes = """
     src/ 
@@ -338,8 +339,9 @@ def build(bld):
     deps/http_parser
     deps/coupling
   """
-  node.uselib_local = "evcom ev eio http_parser coupling"
-  node.uselib = "UDNS V8 EXECINFO DL"
+  node.add_objects = 'ev eio evcom http_parser coupling'
+  node.uselib_local = ''
+  node.uselib = 'UDNS V8 EXECINFO DL'
   node.install_path = '${PREFIX}/lib'
   node.install_path = '${PREFIX}/bin'
   node.chmod = 0755
@@ -378,9 +380,9 @@ def build(bld):
   bld.install_files('${PREFIX}/include/node/', """
     config.h
     src/node.h
-    src/object_wrap.h
-    src/events.h
-    src/net.h
+    src/node_object_wrap.h
+    src/node_events.h
+    src/node_net.h
   """)
 
   # Only install the man page if it exists. 
@@ -395,3 +397,16 @@ def build(bld):
   bld.install_files('${PREFIX}/lib/node/wafadmin/Tools', 'tools/wafadmin/Tools/*.py')
 
   bld.install_files('${PREFIX}/lib/node/libraries/', 'lib/*.js')
+
+def shutdown():
+  Options.options.debug
+  # HACK to get binding.node out of build directory.
+  # better way to do this?
+  if not Options.commands['clean']:
+    if os.path.exists('build/default/node') and not os.path.exists('node'):
+      os.symlink('build/default/node', 'node')
+    if os.path.exists('build/debug/node_g') and not os.path.exists('node_g'):
+      os.symlink('build/debug/node_g', 'node_g')
+  else:
+    if os.path.exists('node'): os.unlink('node')
+    if os.path.exists('node_g'): os.unlink('node_g')
